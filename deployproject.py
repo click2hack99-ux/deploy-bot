@@ -9,8 +9,20 @@ import shutil
 import psutil
 import asyncio
 from datetime import datetime
+from flask import Flask
+from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+
+# --- FLASK APP FOR PORT 500 ---
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
+def run_flask():
+    app.run(host='0.0.0.0', port=5000)
 
 # --- CONFIGURATION ---
 TOKEN = '8635537345:AAFRhzpRhV1MU6It2a_1MDU2pPNfEgtVwr4'
@@ -88,7 +100,7 @@ def stop_project(user_id):
 
 async def install_dependencies(user_dir, user_id, context):
     """Install all dependencies that user projects might need"""
-    common_deps = ['telebot', 'python-telegram-bot', 'requests', 'psutil']
+    common_deps = ['telebot', 'python-telegram-bot', 'requests', 'psutil', 'pyTelegramBotAPI']
     
     req_file = os.path.join(user_dir, 'requirements.txt')
     if os.path.exists(req_file):
@@ -245,37 +257,33 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🖥 Server Stats:\nCPU: {cpu}%\nRAM: {ram}%")
 
 # --- AUTO-RESTART ON BOOT ---
-async def restart_projects(application: Application):
+async def restart_projects():
     projects = get_all_projects_db()
     for p in projects:
         if p[2] == "Running":
             user_id = p[0]
             user_dir = os.path.join(PROJECTS_DIR, str(user_id))
-            files = os.listdir(user_dir)
-            main_file = None
-            for f_name in ['main.py', 'bot.py']:
-                if f_name in files:
-                    main_file = os.path.join(user_dir, f_name)
-                    break
-            if not main_file:
-                py_files = [f for f in files if f.endswith('.py')]
-                if py_files: main_file = os.path.join(user_dir, py_files[0])
-            
-            if main_file:
-                log_file = os.path.join(user_dir, 'output.log')
-                with open(log_file, 'a') as f:
-                    process = subprocess.Popen([sys.executable, main_file], 
-                                               stdout=f, stderr=subprocess.STDOUT, 
-                                               cwd=user_dir, preexec_fn=os.setsid)
-                update_project_db(user_id, p[1], "Running", process.pid)
-                logger.info(f"Auto-restarted project for {user_id}")
+            if os.path.exists(user_dir):
+                files = os.listdir(user_dir)
+                main_file = None
+                for f_name in ['main.py', 'bot.py']:
+                    if f_name in files:
+                        main_file = os.path.join(user_dir, f_name)
+                        break
+                if not main_file:
+                    py_files = [f for f in files if f.endswith('.py')]
+                    if py_files: main_file = os.path.join(user_dir, py_files[0])
+                
+                if main_file:
+                    log_file = os.path.join(user_dir, 'output.log')
+                    with open(log_file, 'a') as f:
+                        process = subprocess.Popen([sys.executable, main_file], 
+                                                   stdout=f, stderr=subprocess.STDOUT, 
+                                                   cwd=user_dir, preexec_fn=os.setsid)
+                    update_project_db(user_id, p[1], "Running", process.pid)
+                    logger.info(f"Auto-restarted project for {user_id}")
 
-# --- MAIN ENTRY POINT ---
-def main():
-    if not os.path.exists(PROJECTS_DIR):
-        os.makedirs(PROJECTS_DIR)
-    init_db()
-    
+async def run_bot():
     application = Application.builder().token(TOKEN).build()
     
     # Handlers
@@ -292,10 +300,30 @@ def main():
     application.add_handler(CommandHandler("stats", admin_stats))
     
     # Auto-restart projects on startup
-    asyncio.run(restart_projects(application))
+    await restart_projects()
     
     logger.info("Bot started...")
-    application.run_polling()
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+    
+    # Keep the bot running
+    while True:
+        await asyncio.sleep(1)
+
+# --- MAIN ENTRY POINT ---
+def main():
+    if not os.path.exists(PROJECTS_DIR):
+        os.makedirs(PROJECTS_DIR)
+    init_db()
+    
+    # Start Flask server in a separate thread for port 5000
+    flask_thread = Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+    
+    # Run the bot
+    asyncio.run(run_bot())
 
 if __name__ == '__main__':
     main()
