@@ -8,6 +8,7 @@ import zipfile
 import shutil
 import psutil
 import asyncio
+import re
 from datetime import datetime
 from flask import Flask
 from threading import Thread
@@ -26,7 +27,7 @@ def run_flask():
 
 # --- CONFIGURATION ---
 TOKEN = '8635537345:AAFRhzpRhV1MU6It2a_1MDU2pPNfEgtVwr4'
-ADMIN_ID = 7741344963  # ✅ Fixed: Your chat ID
+ADMIN_ID = 7741344963
 DB_FILE = 'bot_database.db'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECTS_DIR = os.path.join(BASE_DIR, 'user_projects')
@@ -83,62 +84,193 @@ def delete_project_db(user_id):
     conn.commit()
     conn.close()
 
-# --- PROCESS MANAGEMENT ---
-def stop_project(user_id):
-    project = get_project_db(user_id)
-    if project and project[3]:  # project[3] is pid
-        try:
-            parent = psutil.Process(project[3])
-            for child in parent.children(recursive=True):
-                child.terminate()
-            parent.terminate()
-            logger.info(f"Stopped project for user {user_id}")
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            logger.warning(f"Process {project[3]} already stopped or inaccessible.")
+# --- DEPENDENCY DETECTION ---
+def detect_imports_from_file(file_path):
+    """Detect all import statements from a Python file"""
+    imports = set()
     
-    update_project_db(user_id, project[1] if project else "None", "Stopped", None)
-
-async def install_dependencies(user_dir, user_id, context):
-    """Install all dependencies that user projects might need"""
     try:
-        # First check if requirements.txt exists
-        req_file = os.path.join(user_dir, 'requirements.txt')
-        if os.path.exists(req_file):
-            await context.bot.send_message(chat_id=user_id, text="📦 Installing dependencies from requirements.txt...")
-            result = subprocess.run([sys.executable, "-m", "pip", "install", "-r", req_file], 
-                                  capture_output=True, text=True, timeout=120)
-            if result.returncode == 0:
-                await context.bot.send_message(chat_id=user_id, text="✅ Requirements installed successfully!")
-            else:
-                await context.bot.send_message(chat_id=user_id, text=f"⚠️ Some requirements failed:\n{result.stderr[:200]}")
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
         
-        # Install telebot specifically (most common for Telegram bots)
-        await context.bot.send_message(chat_id=user_id, text="📦 Installing telebot...")
-        result = subprocess.run([sys.executable, "-m", "pip", "install", "telebot"], 
-                              capture_output=True, text=True, timeout=60)
-        if result.returncode == 0:
-            await context.bot.send_message(chat_id=user_id, text="✅ telebot installed!")
-        else:
-            # Try pyTelegramBotAPI as alternative
-            await context.bot.send_message(chat_id=user_id, text="📦 Installing pyTelegramBotAPI...")
-            subprocess.run([sys.executable, "-m", "pip", "install", "pyTelegramBotAPI"], 
-                         capture_output=True, text=True, timeout=60)
+        # Pattern for: import x, import x as y, from x import y
+        patterns = [
+            r'^import\s+([a-zA-Z_][a-zA-Z0-9_]*)',  # import module
+            r'^from\s+([a-zA-Z_][a-zA-Z0-9_]*)',    # from module import
+            r'^import\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+as',  # import module as
+        ]
         
-        # Install other common dependencies
-        common_deps = ['requests', 'psutil']
-        for dep in common_deps:
-            subprocess.run([sys.executable, "-m", "pip", "install", dep], 
-                         capture_output=True, text=True, timeout=30)
-        
-        await context.bot.send_message(chat_id=user_id, text="✅ All dependencies installed!")
-        return True
+        for line in content.split('\n'):
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            
+            for pattern in patterns:
+                matches = re.findall(pattern, line)
+                for match in matches:
+                    # Filter out Python built-in modules
+                    builtins = {'sys', 'os', 're', 'json', 'time', 'datetime', 'math', 
+                               'random', 'string', 'collections', 'itertools', 'functools',
+                               'typing', 'abc', 'io', 'socket', 'threading', 'multiprocessing',
+                               'subprocess', 'signal', 'logging', 'argparse', 'configparser',
+                               'csv', 'xml', 'html', 'urllib', 'http', 'email', 'base64',
+                               'hashlib', 'hmac', 'tempfile', 'shutil', 'glob', 'fnmatch',
+                               'pickle', 'shelve', 'copy', 'pprint', 'traceback', 'warnings',
+                               'contextlib', 'dataclasses', 'enum', 'pathlib', 'statistics',
+                               'asyncio', 'concurrent', 'queue', 'heapq', 'bisect', 'array',
+                               'struct', 'binascii', 'zlib', 'gzip', 'zipfile', 'tarfile',
+                               'crypt', 'ssl', 'email', 'mimetypes', 'uuid', 'secrets'}
+                    
+                    if match not in builtins:
+                        imports.add(match)
+    
     except Exception as e:
-        await context.bot.send_message(chat_id=user_id, text=f"❌ Error installing dependencies: {str(e)[:200]}")
-        return False
+        logger.error(f"Error detecting imports: {e}")
+    
+    return imports
+
+def get_package_name(import_name):
+    """Map import name to pip package name"""
+    mapping = {
+        'telebot': 'telebot',
+        'pyTelegramBotAPI': 'pyTelegramBotAPI',
+        'discord': 'discord.py',
+        'requests': 'requests',
+        'flask': 'flask',
+        'django': 'django',
+        'numpy': 'numpy',
+        'pandas': 'pandas',
+        'matplotlib': 'matplotlib',
+        'seaborn': 'seaborn',
+        'scipy': 'scipy',
+        'sklearn': 'scikit-learn',
+        'tensorflow': 'tensorflow',
+        'torch': 'torch',
+        'keras': 'keras',
+        'opencv': 'opencv-python',
+        'PIL': 'pillow',
+        'Pillow': 'pillow',
+        'cv2': 'opencv-python',
+        'bs4': 'beautifulsoup4',
+        'BeautifulSoup': 'beautifulsoup4',
+        'selenium': 'selenium',
+        'scrapy': 'scrapy',
+        'fastapi': 'fastapi',
+        'uvicorn': 'uvicorn',
+        'pytest': 'pytest',
+        'mysql': 'mysql-connector-python',
+        'pymysql': 'pymysql',
+        'psycopg2': 'psycopg2-binary',
+        'sqlalchemy': 'sqlalchemy',
+        'alembic': 'alembic',
+        'celery': 'celery',
+        'redis': 'redis',
+        'pymongo': 'pymongo',
+        'motor': 'motor',
+        'aiohttp': 'aiohttp',
+        'httpx': 'httpx',
+        'websockets': 'websockets',
+        'python-telegram-bot': 'python-telegram-bot',
+        'ptb': 'python-telegram-bot',
+        'pyrogram': 'pyrogram',
+        'aiogram': 'aiogram',
+        'pydantic': 'pydantic',
+        'click': 'click',
+        'colorama': 'colorama',
+        'tqdm': 'tqdm',
+        'python-dotenv': 'python-dotenv',
+        'dotenv': 'python-dotenv',
+    }
+    
+    # Get base package name (remove aliases like 'as')
+    base_name = import_name.split(' as ')[0].split('.')[0]
+    
+    return mapping.get(base_name, base_name)
+
+async def auto_install_dependencies(file_path, user_id, context):
+    """Auto-detect and install dependencies from Python file"""
+    await context.bot.send_message(chat_id=user_id, text="🔍 Scanning for dependencies...")
+    
+    # Detect imports
+    imports = detect_imports_from_file(file_path)
+    
+    if not imports:
+        await context.bot.send_message(chat_id=user_id, text="ℹ️ No external dependencies detected.")
+        return True
+    
+    await context.bot.send_message(
+        chat_id=user_id, 
+        text=f"📦 Found {len(imports)} dependencies:\n`{', '.join(list(imports)[:10])}`",
+        parse_mode='Markdown'
+    )
+    
+    # Convert to pip packages
+    packages = []
+    for imp in imports:
+        pkg = get_package_name(imp)
+        if pkg and pkg not in packages:
+            packages.append(pkg)
+    
+    if not packages:
+        await context.bot.send_message(chat_id=user_id, text="ℹ️ No installable packages found.")
+        return True
+    
+    await context.bot.send_message(
+        chat_id=user_id, 
+        text=f"📥 Installing {len(packages)} packages... This may take a moment.",
+        parse_mode='Markdown'
+    )
+    
+    # Install packages one by one with progress
+    installed = 0
+    failed = []
+    
+    for i, pkg in enumerate(packages, 1):
+        try:
+            await context.bot.send_message(
+                chat_id=user_id, 
+                text=f"⏳ [{i}/{len(packages)}] Installing `{pkg}`...",
+                parse_mode='Markdown'
+            )
+            
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", pkg],
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+            
+            if result.returncode == 0:
+                installed += 1
+            else:
+                failed.append(pkg)
+                logger.warning(f"Failed to install {pkg}: {result.stderr[:100]}")
+                
+        except subprocess.TimeoutExpired:
+            failed.append(f"{pkg} (timeout)")
+        except Exception as e:
+            failed.append(f"{pkg} ({str(e)[:20]})")
+    
+    # Send summary
+    if installed > 0:
+        await context.bot.send_message(
+            chat_id=user_id, 
+            text=f"✅ Installed {installed}/{len(packages)} packages successfully!"
+        )
+    
+    if failed:
+        await context.bot.send_message(
+            chat_id=user_id, 
+            text=f"⚠️ Failed to install: `{', '.join(failed)}`\n\n"
+                 f"Try adding these to a `requirements.txt` file.",
+            parse_mode='Markdown'
+        )
+    
+    return True
 
 async def deploy_project(user_id, file_path, context: ContextTypes.DEFAULT_TYPE):
     try:
-        # Stop existing project first
+        # Stop existing project
         stop_project(user_id)
         
         user_dir = os.path.join(PROJECTS_DIR, str(user_id))
@@ -151,30 +283,44 @@ async def deploy_project(user_id, file_path, context: ContextTypes.DEFAULT_TYPE)
         shutil.move(file_path, target_path)
         
         main_file = target_path
+        
+        # Handle zip file
         if project_name.endswith('.zip'):
             await context.bot.send_message(chat_id=user_id, text="📦 Extracting zip file...")
             with zipfile.ZipFile(target_path, 'r') as zip_ref:
                 zip_ref.extractall(user_dir)
-            # Look for main file
+            
+            # Find main file
             files = os.listdir(user_dir)
-            if 'main.py' in files:
-                main_file = os.path.join(user_dir, 'main.py')
-            elif 'bot.py' in files:
-                main_file = os.path.join(user_dir, 'bot.py')
-            else:
-                py_files = [f for f in files if f.endswith('.py')]
+            priority_files = ['main.py', 'bot.py', 'app.py', 'run.py', 'index.py']
+            for f in priority_files:
+                if f in files:
+                    main_file = os.path.join(user_dir, f)
+                    break
+            
+            if not main_file or main_file == target_path:
+                py_files = [f for f in files if f.endswith('.py') and f != 'requirements.txt']
                 if py_files:
                     main_file = os.path.join(user_dir, py_files[0])
                 else:
-                    await context.bot.send_message(chat_id=user_id, text="❌ No .py file found in zip!")
+                    await context.bot.send_message(
+                        chat_id=user_id, 
+                        text="❌ No Python file found in the zip!"
+                    )
                     return
         
-        # Install dependencies
-        install_success = await install_dependencies(user_dir, user_id, context)
-        if not install_success:
-            await context.bot.send_message(chat_id=user_id, text="⚠️ Continuing despite dependency issues...")
+        # Auto-detect and install dependencies
+        if main_file and os.path.exists(main_file):
+            await auto_install_dependencies(main_file, user_id, context)
         
-        # Start project
+        # Also check for requirements.txt if exists
+        req_file = os.path.join(user_dir, 'requirements.txt')
+        if os.path.exists(req_file):
+            await context.bot.send_message(chat_id=user_id, text="📦 Found requirements.txt, installing...")
+            subprocess.run([sys.executable, "-m", "pip", "install", "-r", req_file], timeout=180)
+            await context.bot.send_message(chat_id=user_id, text="✅ Requirements installed!")
+        
+        # Start the project
         log_file = os.path.join(user_dir, 'output.log')
         
         def preexec():
@@ -186,49 +332,65 @@ async def deploy_project(user_id, file_path, context: ContextTypes.DEFAULT_TYPE)
             except ImportError:
                 pass
         
-        await context.bot.send_message(chat_id=user_id, text=f"🚀 Starting project: {os.path.basename(main_file)}...")
+        await context.bot.send_message(
+            chat_id=user_id, 
+            text=f"🚀 Starting `{os.path.basename(main_file)}`...",
+            parse_mode='Markdown'
+        )
         
         with open(log_file, 'w') as f:
-            process = subprocess.Popen([sys.executable, main_file], 
-                                     stdout=f, stderr=subprocess.STDOUT, 
-                                     cwd=user_dir, preexec_fn=preexec)
+            process = subprocess.Popen(
+                [sys.executable, main_file],
+                stdout=f,
+                stderr=subprocess.STDOUT,
+                cwd=user_dir,
+                preexec_fn=preexec
+            )
         
         update_project_db(user_id, project_name, "Running", process.pid)
         
-        # Wait a moment to check if process is still running
-        await asyncio.sleep(2)
+        # Wait and check
+        await asyncio.sleep(3)
+        
         if psutil.pid_exists(process.pid):
+            try:
+                proc = psutil.Process(process.pid)
+                if proc.is_running():
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=f"✅ **Project Deployed Successfully!**\n\n"
+                             f"📂 File: `{os.path.basename(main_file)}`\n"
+                             f"🆔 PID: `{process.pid}`\n"
+                             f"💾 Memory: {proc.memory_info().rss / 1024 / 1024:.2f} MB\n\n"
+                             f"📌 `/logs` - View output\n"
+                             f"📌 `/stop` - Stop project\n"
+                             f"📌 `/status` - Check status",
+                        parse_mode='Markdown'
+                    )
+                    return
+            except:
+                pass
+        
+        # Process died
+        if os.path.exists(log_file):
+            with open(log_file, 'r') as f:
+                error_log = f.read()[-500:]
             await context.bot.send_message(
-                chat_id=user_id, 
-                text=f"✅ **Project {project_name} deployed successfully!**\n"
-                     f"📂 File: {os.path.basename(main_file)}\n"
-                     f"🆔 PID: `{process.pid}`\n"
-                     f"📊 Status: Running\n\n"
-                     f"Use /logs to see the output.",
+                chat_id=user_id,
+                text=f"❌ **Project Crashed!**\n\n"
+                     f"📋 Error log:\n```\n{error_log}\n```",
                 parse_mode='Markdown'
             )
         else:
-            # Process died immediately, check logs
-            if os.path.exists(log_file):
-                with open(log_file, 'r') as f:
-                    error_log = f.read()[-500:]
-                await context.bot.send_message(
-                    chat_id=user_id, 
-                    text=f"❌ **Project crashed on startup!**\n\n"
-                         f"📋 Error log:\n```\n{error_log}\n```",
-                    parse_mode='Markdown'
-                )
-            else:
-                await context.bot.send_message(
-                    chat_id=user_id, 
-                    text="❌ **Project failed to start!**\n"
-                         "Check your code for errors.",
-                    parse_mode='Markdown'
-                )
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="❌ **Project failed to start!**\nNo logs found."
+            )
+            
     except Exception as e:
         await context.bot.send_message(
-            chat_id=user_id, 
-            text=f"❌ **Deployment failed:**\n`{str(e)[:300]}`",
+            chat_id=user_id,
+            text=f"❌ **Deployment failed:**\n```\n{str(e)[:300]}\n```",
             parse_mode='Markdown'
         )
         logger.error(f"Deployment error for user {user_id}: {e}")
@@ -236,27 +398,25 @@ async def deploy_project(user_id, file_path, context: ContextTypes.DEFAULT_TYPE)
 # --- COMMAND HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Welcome to Python Auto-Deploy Bot!\n\n"
-        "Send me a .py file or a .zip archive to deploy your project.\n\n"
-        "📜 **User Commands:**\n"
-        "/status - Check your project status\n"
+        "👋 **Python Auto-Deploy Bot**\n\n"
+        "Send me a `.py` file or `.zip` archive.\n"
+        "I'll automatically detect and install all dependencies!\n\n"
+        "📜 **Commands:**\n"
+        "/status - Check project status\n"
         "/logs - View last 20 lines of logs\n"
         "/stop - Stop your project\n"
         "/restart - Restart your project\n\n"
-        "🛠 **Admin Commands:**\n"
-        "/list - List all projects\n"
-        "/admin_stop <user_id> - Stop a user's project\n"
-        "/broadcast <message> - Message all users\n"
-        "/stats - Server health (CPU/RAM)"
+        "🛠 **Admin:** /list, /stats, /broadcast",
+        parse_mode='Markdown'
     )
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
     if not (doc.file_name.endswith('.py') or doc.file_name.endswith('.zip')):
-        await update.message.reply_text("❌ Please send a .py or .zip file only.")
+        await update.message.reply_text("❌ Please send a `.py` or `.zip` file.")
         return
     
-    await update.message.reply_text("📥 Downloading and deploying your project...")
+    await update.message.reply_text("📥 Downloading your project...")
     file = await context.bot.get_file(doc.file_id)
     file_path = os.path.join(BASE_DIR, doc.file_name)
     await file.download_to_drive(file_path)
@@ -269,11 +429,15 @@ async def get_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if os.path.exists(log_file):
         with open(log_file, 'r') as f:
             logs = f.readlines()[-20:]
-        msg = "".join(logs) if logs else "Logs are empty."
-        if len(msg) > 4000: msg = msg[-4000:]
-        await update.message.reply_text(f"📋 **Last 20 lines of logs:**\n\n`{msg}`", parse_mode='Markdown')
+        msg = "".join(logs) if logs else "📭 Logs are empty."
+        if len(msg) > 4000:
+            msg = msg[-4000:]
+        await update.message.reply_text(
+            f"📋 **Last 20 lines:**\n\n```\n{msg}\n```",
+            parse_mode='Markdown'
+        )
     else:
-        await update.message.reply_text("❌ No logs found. Is your project running?")
+        await update.message.reply_text("❌ No logs found.")
 
 async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -297,32 +461,40 @@ async def restart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     project = get_project_db(user_id)
     if not project:
-        await update.message.reply_text("❌ No project found to restart.")
+        await update.message.reply_text("❌ No project found.")
         return
     
-    await update.message.reply_text("🔄 Restarting your project...")
+    await update.message.reply_text("🔄 Restarting...")
     stop_project(user_id)
     
-    # Find main file
     user_dir = os.path.join(PROJECTS_DIR, str(user_id))
     if os.path.exists(user_dir):
         files = os.listdir(user_dir)
         main_file = None
-        for f in files:
-            if f.endswith('.py') and f not in ['requirements.txt']:
+        priority_files = ['main.py', 'bot.py', 'app.py', 'run.py']
+        for f in priority_files:
+            if f in files:
                 main_file = os.path.join(user_dir, f)
                 break
+        if not main_file:
+            py_files = [f for f in files if f.endswith('.py') and f != 'requirements.txt']
+            if py_files:
+                main_file = os.path.join(user_dir, py_files[0])
         
         if main_file:
             log_file = os.path.join(user_dir, 'output.log')
             def preexec():
                 os.setsid()
             with open(log_file, 'a') as f:
-                process = subprocess.Popen([sys.executable, main_file], 
-                                         stdout=f, stderr=subprocess.STDOUT, 
-                                         cwd=user_dir, preexec_fn=preexec)
+                process = subprocess.Popen(
+                    [sys.executable, main_file],
+                    stdout=f,
+                    stderr=subprocess.STDOUT,
+                    cwd=user_dir,
+                    preexec_fn=preexec
+                )
             update_project_db(user_id, project[1], "Running", process.pid)
-            await update.message.reply_text(f"✅ Project restarted! PID: `{process.pid}`", parse_mode='Markdown')
+            await update.message.reply_text(f"✅ Restarted! PID: `{process.pid}`", parse_mode='Markdown')
         else:
             await update.message.reply_text("❌ Main file not found.")
 
@@ -330,10 +502,13 @@ async def restart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     projects = get_all_projects_db()
+    if not projects:
+        await update.message.reply_text("📭 No projects.")
+        return
     msg = "📋 **All Projects:**\n\n"
     for p in projects:
         msg += f"👤 User: `{p[0]}`\n📦 Project: `{p[1]}`\n🚦 Status: `{p[2]}`\n\n"
-    await update.message.reply_text(msg if projects else "No projects found.", parse_mode='Markdown')
+    await update.message.reply_text(msg, parse_mode='Markdown')
 
 async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
@@ -345,11 +520,11 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     count = 0
     for p in projects:
         try:
-            await context.bot.send_message(chat_id=p[0], text=f"📢 **Broadcast from Admin:**\n\n{msg}", parse_mode='Markdown')
+            await context.bot.send_message(chat_id=p[0], text=f"📢 **Admin Broadcast:**\n\n{msg}", parse_mode='Markdown')
             count += 1
-        except Exception:
+        except:
             pass
-    await update.message.reply_text(f"✅ Message sent to {count} users.")
+    await update.message.reply_text(f"✅ Sent to {count} users.")
 
 async def admin_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
@@ -358,15 +533,22 @@ async def admin_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     target_id = int(context.args[0])
     stop_project(target_id)
-    await update.message.reply_text(f"Stopped project for {target_id}")
+    await update.message.reply_text(f"✅ Stopped user `{target_id}`", parse_mode='Markdown')
 
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     cpu = psutil.cpu_percent()
     ram = psutil.virtual_memory().percent
-    await update.message.reply_text(f"🖥 Server Stats:\nCPU: {cpu}%\nRAM: {ram}%")
+    disk = psutil.disk_usage('/')
+    await update.message.reply_text(
+        f"🖥 **Server Stats**\n\n"
+        f"💻 CPU: `{cpu}%`\n"
+        f"🧠 RAM: `{ram}%`\n"
+        f"💾 Disk: `{disk.used / (1024**3):.1f}GB / {disk.total / (1024**3):.1f}GB`",
+        parse_mode='Markdown'
+    )
 
-# --- AUTO-RESTART ON BOOT ---
+# --- AUTO-RESTART ---
 async def restart_projects():
     projects = get_all_projects_db()
     for p in projects:
@@ -376,26 +558,34 @@ async def restart_projects():
             if os.path.exists(user_dir):
                 files = os.listdir(user_dir)
                 main_file = None
-                for f in files:
-                    if f.endswith('.py') and f not in ['requirements.txt']:
+                priority_files = ['main.py', 'bot.py', 'app.py', 'run.py']
+                for f in priority_files:
+                    if f in files:
                         main_file = os.path.join(user_dir, f)
                         break
+                if not main_file:
+                    py_files = [f for f in files if f.endswith('.py') and f != 'requirements.txt']
+                    if py_files:
+                        main_file = os.path.join(user_dir, py_files[0])
                 
                 if main_file:
                     log_file = os.path.join(user_dir, 'output.log')
                     def preexec():
                         os.setsid()
                     with open(log_file, 'a') as f:
-                        process = subprocess.Popen([sys.executable, main_file], 
-                                                   stdout=f, stderr=subprocess.STDOUT, 
-                                                   cwd=user_dir, preexec_fn=preexec)
+                        process = subprocess.Popen(
+                            [sys.executable, main_file],
+                            stdout=f,
+                            stderr=subprocess.STDOUT,
+                            cwd=user_dir,
+                            preexec_fn=preexec
+                        )
                     update_project_db(user_id, p[1], "Running", process.pid)
-                    logger.info(f"Auto-restarted project for {user_id}")
+                    logger.info(f"Auto-restarted user {user_id}")
 
 async def run_bot():
     application = Application.builder().token(TOKEN).build()
     
-    # Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("logs", get_logs))
     application.add_handler(CommandHandler("stop", stop_cmd))
@@ -403,13 +593,11 @@ async def run_bot():
     application.add_handler(CommandHandler("restart", restart_cmd))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     
-    # Admin Handlers
     application.add_handler(CommandHandler("list", admin_list))
     application.add_handler(CommandHandler("admin_stop", admin_stop))
     application.add_handler(CommandHandler("broadcast", admin_broadcast))
     application.add_handler(CommandHandler("stats", admin_stats))
     
-    # Auto-restart projects on startup
     await restart_projects()
     
     logger.info("Bot started...")
@@ -417,22 +605,19 @@ async def run_bot():
     await application.start()
     await application.updater.start_polling()
     
-    # Keep the bot running
     while True:
         await asyncio.sleep(1)
 
-# --- MAIN ENTRY POINT ---
+# --- MAIN ---
 def main():
     if not os.path.exists(PROJECTS_DIR):
         os.makedirs(PROJECTS_DIR)
     init_db()
     
-    # Start Flask server in a separate thread for port 5000
     flask_thread = Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
     
-    # Run the bot
     asyncio.run(run_bot())
 
 if __name__ == '__main__':
