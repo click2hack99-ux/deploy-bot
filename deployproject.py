@@ -14,7 +14,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 # --- CONFIGURATION ---
 TOKEN = '8635537345:AAFRhzpRhV1MU6It2a_1MDU2pPNfEgtVwr4'
-ADMIN_ID = 7741344963  # Replace with your Telegram User ID if different
+ADMIN_ID = 7741344963  # ✅ Fixed: Your chat ID
 DB_FILE = 'bot_database.db'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECTS_DIR = os.path.join(BASE_DIR, 'user_projects')
@@ -86,8 +86,21 @@ def stop_project(user_id):
     
     update_project_db(user_id, project[1] if project else "None", "Stopped", None)
 
+async def install_dependencies(user_dir, user_id, context):
+    """Install all dependencies that user projects might need"""
+    common_deps = ['telebot', 'python-telegram-bot', 'requests', 'psutil']
+    
+    req_file = os.path.join(user_dir, 'requirements.txt')
+    if os.path.exists(req_file):
+        await context.bot.send_message(chat_id=user_id, text="📦 Installing dependencies from requirements.txt...")
+        subprocess.run([sys.executable, "-m", "pip", "install", "-r", req_file])
+    
+    await context.bot.send_message(chat_id=user_id, text="📦 Installing common dependencies...")
+    for dep in common_deps:
+        subprocess.run([sys.executable, "-m", "pip", "install", dep])
+
 async def deploy_project(user_id, file_path, context: ContextTypes.DEFAULT_TYPE):
-    stop_project(user_id)  # Stop existing project first
+    stop_project(user_id)
     
     user_dir = os.path.join(PROJECTS_DIR, str(user_id))
     if os.path.exists(user_dir):
@@ -98,40 +111,31 @@ async def deploy_project(user_id, file_path, context: ContextTypes.DEFAULT_TYPE)
     target_path = os.path.join(user_dir, project_name)
     shutil.move(file_path, target_path)
     
-    # Extract if zip
     main_file = target_path
     if project_name.endswith('.zip'):
         with zipfile.ZipFile(target_path, 'r') as zip_ref:
             zip_ref.extractall(user_dir)
-        # Look for a main file
         files = os.listdir(user_dir)
         if 'main.py' in files:
             main_file = os.path.join(user_dir, 'main.py')
         elif 'bot.py' in files:
             main_file = os.path.join(user_dir, 'bot.py')
         else:
-            # Pick the first .py file that isn't requirements.txt
             py_files = [f for f in files if f.endswith('.py')]
             if py_files:
                 main_file = os.path.join(user_dir, py_files[0])
 
-    # Install requirements
-    req_file = os.path.join(user_dir, 'requirements.txt')
-    if os.path.exists(req_file):
-        await context.bot.send_message(chat_id=user_id, text="Installing dependencies...")
-        subprocess.run([sys.executable, "-m", "pip", "install", "-r", req_file])
+    # Install dependencies
+    await install_dependencies(user_dir, user_id, context)
 
     # Start project
     log_file = os.path.join(user_dir, 'output.log')
     try:
-        # Resource Limiting (Linux only)
         def preexec():
             os.setsid()
             try:
                 import resource
-                # Limit address space to 512MB
                 resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
-                # Limit CPU time to 1 hour (per process start)
                 resource.setrlimit(resource.RLIMIT_CPU, (3600, 3600))
             except ImportError:
                 pass
@@ -247,7 +251,6 @@ async def restart_projects(application: Application):
         if p[2] == "Running":
             user_id = p[0]
             user_dir = os.path.join(PROJECTS_DIR, str(user_id))
-            # Try to find main file again
             files = os.listdir(user_dir)
             main_file = None
             for f_name in ['main.py', 'bot.py']:
@@ -288,7 +291,7 @@ def main():
     application.add_handler(CommandHandler("broadcast", admin_broadcast))
     application.add_handler(CommandHandler("stats", admin_stats))
     
-    # Auto-restart projects on startup - use asyncio.run() instead
+    # Auto-restart projects on startup
     asyncio.run(restart_projects(application))
     
     logger.info("Bot started...")
