@@ -14,7 +14,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 # --- CONFIGURATION ---
 TOKEN = '8635537345:AAFRhzpRhV1MU6It2a_1MDU2pPNfEgtVwr4'
-ADMIN_ID = 6386561081  # Replace with your Telegram User ID if different
+ADMIN_ID = 7741344963  # Replace with your Telegram User ID if different
 DB_FILE = 'bot_database.db'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECTS_DIR = os.path.join(BASE_DIR, 'user_projects')
@@ -288,9 +288,8 @@ def main():
     application.add_handler(CommandHandler("broadcast", admin_broadcast))
     application.add_handler(CommandHandler("stats", admin_stats))
     
-    # Auto-restart projects on startup
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(restart_projects(application))
+    # Auto-restart projects on startup - use asyncio.run() instead
+    asyncio.run(restart_projects(application))
     
     logger.info("Bot started...")
     application.run_polling()
