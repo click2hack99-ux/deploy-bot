@@ -100,49 +100,83 @@ def stop_project(user_id):
 
 async def install_dependencies(user_dir, user_id, context):
     """Install all dependencies that user projects might need"""
-    common_deps = ['telebot', 'python-telegram-bot', 'requests', 'psutil', 'pyTelegramBotAPI']
-    
-    req_file = os.path.join(user_dir, 'requirements.txt')
-    if os.path.exists(req_file):
-        await context.bot.send_message(chat_id=user_id, text="📦 Installing dependencies from requirements.txt...")
-        subprocess.run([sys.executable, "-m", "pip", "install", "-r", req_file])
-    
-    await context.bot.send_message(chat_id=user_id, text="📦 Installing common dependencies...")
-    for dep in common_deps:
-        subprocess.run([sys.executable, "-m", "pip", "install", dep])
+    try:
+        # First check if requirements.txt exists
+        req_file = os.path.join(user_dir, 'requirements.txt')
+        if os.path.exists(req_file):
+            await context.bot.send_message(chat_id=user_id, text="📦 Installing dependencies from requirements.txt...")
+            result = subprocess.run([sys.executable, "-m", "pip", "install", "-r", req_file], 
+                                  capture_output=True, text=True, timeout=120)
+            if result.returncode == 0:
+                await context.bot.send_message(chat_id=user_id, text="✅ Requirements installed successfully!")
+            else:
+                await context.bot.send_message(chat_id=user_id, text=f"⚠️ Some requirements failed:\n{result.stderr[:200]}")
+        
+        # Install telebot specifically (most common for Telegram bots)
+        await context.bot.send_message(chat_id=user_id, text="📦 Installing telebot...")
+        result = subprocess.run([sys.executable, "-m", "pip", "install", "telebot"], 
+                              capture_output=True, text=True, timeout=60)
+        if result.returncode == 0:
+            await context.bot.send_message(chat_id=user_id, text="✅ telebot installed!")
+        else:
+            # Try pyTelegramBotAPI as alternative
+            await context.bot.send_message(chat_id=user_id, text="📦 Installing pyTelegramBotAPI...")
+            subprocess.run([sys.executable, "-m", "pip", "install", "pyTelegramBotAPI"], 
+                         capture_output=True, text=True, timeout=60)
+        
+        # Install other common dependencies
+        common_deps = ['requests', 'psutil']
+        for dep in common_deps:
+            subprocess.run([sys.executable, "-m", "pip", "install", dep], 
+                         capture_output=True, text=True, timeout=30)
+        
+        await context.bot.send_message(chat_id=user_id, text="✅ All dependencies installed!")
+        return True
+    except Exception as e:
+        await context.bot.send_message(chat_id=user_id, text=f"❌ Error installing dependencies: {str(e)[:200]}")
+        return False
 
 async def deploy_project(user_id, file_path, context: ContextTypes.DEFAULT_TYPE):
-    stop_project(user_id)
-    
-    user_dir = os.path.join(PROJECTS_DIR, str(user_id))
-    if os.path.exists(user_dir):
-        shutil.rmtree(user_dir)
-    os.makedirs(user_dir, exist_ok=True)
-    
-    project_name = os.path.basename(file_path)
-    target_path = os.path.join(user_dir, project_name)
-    shutil.move(file_path, target_path)
-    
-    main_file = target_path
-    if project_name.endswith('.zip'):
-        with zipfile.ZipFile(target_path, 'r') as zip_ref:
-            zip_ref.extractall(user_dir)
-        files = os.listdir(user_dir)
-        if 'main.py' in files:
-            main_file = os.path.join(user_dir, 'main.py')
-        elif 'bot.py' in files:
-            main_file = os.path.join(user_dir, 'bot.py')
-        else:
-            py_files = [f for f in files if f.endswith('.py')]
-            if py_files:
-                main_file = os.path.join(user_dir, py_files[0])
-
-    # Install dependencies
-    await install_dependencies(user_dir, user_id, context)
-
-    # Start project
-    log_file = os.path.join(user_dir, 'output.log')
     try:
+        # Stop existing project first
+        stop_project(user_id)
+        
+        user_dir = os.path.join(PROJECTS_DIR, str(user_id))
+        if os.path.exists(user_dir):
+            shutil.rmtree(user_dir)
+        os.makedirs(user_dir, exist_ok=True)
+        
+        project_name = os.path.basename(file_path)
+        target_path = os.path.join(user_dir, project_name)
+        shutil.move(file_path, target_path)
+        
+        main_file = target_path
+        if project_name.endswith('.zip'):
+            await context.bot.send_message(chat_id=user_id, text="📦 Extracting zip file...")
+            with zipfile.ZipFile(target_path, 'r') as zip_ref:
+                zip_ref.extractall(user_dir)
+            # Look for main file
+            files = os.listdir(user_dir)
+            if 'main.py' in files:
+                main_file = os.path.join(user_dir, 'main.py')
+            elif 'bot.py' in files:
+                main_file = os.path.join(user_dir, 'bot.py')
+            else:
+                py_files = [f for f in files if f.endswith('.py')]
+                if py_files:
+                    main_file = os.path.join(user_dir, py_files[0])
+                else:
+                    await context.bot.send_message(chat_id=user_id, text="❌ No .py file found in zip!")
+                    return
+        
+        # Install dependencies
+        install_success = await install_dependencies(user_dir, user_id, context)
+        if not install_success:
+            await context.bot.send_message(chat_id=user_id, text="⚠️ Continuing despite dependency issues...")
+        
+        # Start project
+        log_file = os.path.join(user_dir, 'output.log')
+        
         def preexec():
             os.setsid()
             try:
@@ -151,16 +185,53 @@ async def deploy_project(user_id, file_path, context: ContextTypes.DEFAULT_TYPE)
                 resource.setrlimit(resource.RLIMIT_CPU, (3600, 3600))
             except ImportError:
                 pass
-
+        
+        await context.bot.send_message(chat_id=user_id, text=f"🚀 Starting project: {os.path.basename(main_file)}...")
+        
         with open(log_file, 'w') as f:
             process = subprocess.Popen([sys.executable, main_file], 
-                                       stdout=f, stderr=subprocess.STDOUT, 
-                                       cwd=user_dir, preexec_fn=preexec)
+                                     stdout=f, stderr=subprocess.STDOUT, 
+                                     cwd=user_dir, preexec_fn=preexec)
         
         update_project_db(user_id, project_name, "Running", process.pid)
-        await context.bot.send_message(chat_id=user_id, text=f"🚀 **Project {project_name} deployed!**\nPID: `{process.pid}`\n\nUse /logs to see the output.", parse_mode='Markdown')
+        
+        # Wait a moment to check if process is still running
+        await asyncio.sleep(2)
+        if psutil.pid_exists(process.pid):
+            await context.bot.send_message(
+                chat_id=user_id, 
+                text=f"✅ **Project {project_name} deployed successfully!**\n"
+                     f"📂 File: {os.path.basename(main_file)}\n"
+                     f"🆔 PID: `{process.pid}`\n"
+                     f"📊 Status: Running\n\n"
+                     f"Use /logs to see the output.",
+                parse_mode='Markdown'
+            )
+        else:
+            # Process died immediately, check logs
+            if os.path.exists(log_file):
+                with open(log_file, 'r') as f:
+                    error_log = f.read()[-500:]
+                await context.bot.send_message(
+                    chat_id=user_id, 
+                    text=f"❌ **Project crashed on startup!**\n\n"
+                         f"📋 Error log:\n```\n{error_log}\n```",
+                    parse_mode='Markdown'
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=user_id, 
+                    text="❌ **Project failed to start!**\n"
+                         "Check your code for errors.",
+                    parse_mode='Markdown'
+                )
     except Exception as e:
-        await context.bot.send_message(chat_id=user_id, text=f"❌ **Failed to start project:**\n`{str(e)}`", parse_mode='Markdown')
+        await context.bot.send_message(
+            chat_id=user_id, 
+            text=f"❌ **Deployment failed:**\n`{str(e)[:300]}`",
+            parse_mode='Markdown'
+        )
+        logger.error(f"Deployment error for user {user_id}: {e}")
 
 # --- COMMAND HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -170,7 +241,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📜 **User Commands:**\n"
         "/status - Check your project status\n"
         "/logs - View last 20 lines of logs\n"
-        "/stop - Stop your project\n\n"
+        "/stop - Stop your project\n"
+        "/restart - Restart your project\n\n"
         "🛠 **Admin Commands:**\n"
         "/list - List all projects\n"
         "/admin_stop <user_id> - Stop a user's project\n"
@@ -181,7 +253,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
     if not (doc.file_name.endswith('.py') or doc.file_name.endswith('.zip')):
-        await update.message.reply_text("Please send a .py or .zip file.")
+        await update.message.reply_text("❌ Please send a .py or .zip file only.")
         return
     
     await update.message.reply_text("📥 Downloading and deploying your project...")
@@ -206,15 +278,53 @@ async def get_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     stop_project(user_id)
-    await update.message.reply_text("Project stopped.")
+    await update.message.reply_text("🛑 Project stopped.")
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     project = get_project_db(user_id)
     if project:
-        await update.message.reply_text(f"Project: {project[1]}\nStatus: {project[2]}\nStarted: {project[4]}")
+        status_text = f"📊 **Project Status**\n\n"
+        status_text += f"📦 Name: `{project[1]}`\n"
+        status_text += f"🚦 Status: `{project[2]}`\n"
+        status_text += f"🆔 PID: `{project[3] if project[3] else 'N/A'}`\n"
+        status_text += f"⏰ Started: `{project[4]}`\n"
+        await update.message.reply_text(status_text, parse_mode='Markdown')
     else:
-        await update.message.reply_text("No active project.")
+        await update.message.reply_text("❌ No active project.")
+
+async def restart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    project = get_project_db(user_id)
+    if not project:
+        await update.message.reply_text("❌ No project found to restart.")
+        return
+    
+    await update.message.reply_text("🔄 Restarting your project...")
+    stop_project(user_id)
+    
+    # Find main file
+    user_dir = os.path.join(PROJECTS_DIR, str(user_id))
+    if os.path.exists(user_dir):
+        files = os.listdir(user_dir)
+        main_file = None
+        for f in files:
+            if f.endswith('.py') and f not in ['requirements.txt']:
+                main_file = os.path.join(user_dir, f)
+                break
+        
+        if main_file:
+            log_file = os.path.join(user_dir, 'output.log')
+            def preexec():
+                os.setsid()
+            with open(log_file, 'a') as f:
+                process = subprocess.Popen([sys.executable, main_file], 
+                                         stdout=f, stderr=subprocess.STDOUT, 
+                                         cwd=user_dir, preexec_fn=preexec)
+            update_project_db(user_id, project[1], "Running", process.pid)
+            await update.message.reply_text(f"✅ Project restarted! PID: `{process.pid}`", parse_mode='Markdown')
+        else:
+            await update.message.reply_text("❌ Main file not found.")
 
 # --- ADMIN COMMANDS ---
 async def admin_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -266,20 +376,19 @@ async def restart_projects():
             if os.path.exists(user_dir):
                 files = os.listdir(user_dir)
                 main_file = None
-                for f_name in ['main.py', 'bot.py']:
-                    if f_name in files:
-                        main_file = os.path.join(user_dir, f_name)
+                for f in files:
+                    if f.endswith('.py') and f not in ['requirements.txt']:
+                        main_file = os.path.join(user_dir, f)
                         break
-                if not main_file:
-                    py_files = [f for f in files if f.endswith('.py')]
-                    if py_files: main_file = os.path.join(user_dir, py_files[0])
                 
                 if main_file:
                     log_file = os.path.join(user_dir, 'output.log')
+                    def preexec():
+                        os.setsid()
                     with open(log_file, 'a') as f:
                         process = subprocess.Popen([sys.executable, main_file], 
                                                    stdout=f, stderr=subprocess.STDOUT, 
-                                                   cwd=user_dir, preexec_fn=os.setsid)
+                                                   cwd=user_dir, preexec_fn=preexec)
                     update_project_db(user_id, p[1], "Running", process.pid)
                     logger.info(f"Auto-restarted project for {user_id}")
 
@@ -291,6 +400,7 @@ async def run_bot():
     application.add_handler(CommandHandler("logs", get_logs))
     application.add_handler(CommandHandler("stop", stop_cmd))
     application.add_handler(CommandHandler("status", status_cmd))
+    application.add_handler(CommandHandler("restart", restart_cmd))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     
     # Admin Handlers
